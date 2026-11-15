@@ -5,17 +5,19 @@ import json
 import shutil
 import subprocess
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 # --- Configuration Directories ---
-MP3_DIR = Path("./original_mp3s")
-ZIP_DIR = Path("./stemdeck_zips")
-PDF_DIR = Path("./pdf_charts")
-OUTPUT_DIR = Path("./st4s_output")
+MP3_DIR = Path("./mp3s")
+ZIP_DIR = Path("./zips")
+PDF_DIR = Path("./PDFs")
+OUTPUT_DIR = Path("./Exports")
 WORK_DIR = Path("./work_temp")
 
-# --- Stage Traxx 4 Mappings (from your Bash script) ---
+
+# --- Stage Traxx 4 Mappings ---
 TRACK_COLORS = [
     1103805914635, 1103792268267, 1103790913921, 
     1103790257876, 1103799559096, 1103805498436, 1103805498436
@@ -44,13 +46,13 @@ STEM_NAMES = {
 }
 
 def sanitize_name(name: str) -> str:
-    """Normalize song title for regex and file matching."""
+    """Normalize song title for regex and zipfile matching."""
     return re.sub(r'[^a-zA-Z0-9]', '', name).lower()
 
-def find_matching_file(target_stem: str, search_dir: Path, extension: str) -> Path | None:
-    """Finds a file matching the target stem using flexible substring logic."""
+def find_matching_zip(target_stem: str, search_dir: Path) -> Path | None:
+    """Finds the Stemdeck zip file using flexible substring matching."""
     target_clean = sanitize_name(target_stem)
-    for file_path in search_dir.glob(f"*{extension}"):
+    for file_path in search_dir.glob("*.zip"):
         if sanitize_name(file_path.stem) in target_clean or target_clean in sanitize_name(file_path.stem):
             return file_path
     return None
@@ -78,7 +80,7 @@ def get_song_len(file_path: Path) -> float:
 def classify_stem_type(filename: str) -> str:
     """Map extracted stem filename keywords to standard bus categories."""
     lower = filename.lower()
-    if 'lead' in lower or 'vocal' in lower and 'back' not in lower:
+    if ('lead' in lower or 'vocal' in lower) and 'back' not in lower and 'bg' not in lower:
         return 'lead-vocals'
     elif 'back' in lower or 'bg' in lower or 'harmony' in lower:
         return 'backing-vocals'
@@ -97,73 +99,97 @@ def process_song(mp3_path: Path):
     song_stem = mp3_path.stem
     print(f"[-] Processing: {song_stem}")
     
-    # 1. Match Stemdeck zip and PDF chart
-    zip_path = find_matching_file(song_stem, ZIP_DIR, ".zip")
+    # Match Stemdeck zip using fuzzy lookup
+    zip_path = find_matching_zip(song_stem, ZIP_DIR)
     if not zip_path:
         print(f"[!] Warning: No matching Stemdeck zip found for {song_stem}")
         return
-    pdf_path = find_matching_file(song_stem, PDF_DIR, ".pdf")
 
-    # Setup temporary staging workspace
+    # Generate Song UUID and extract first 8 digits for suffix
+    song_uuid = get_url_uuid(song_stem)
+    uuid_suffix = song_uuid.split('-')[0]
+    
+    # Setup temporary staging workspace using SONGFILE_SUFFIX folder pattern
+    stem_folder_name = f"{song_stem}_{uuid_suffix}"
     song_work = WORK_DIR / song_stem
+    stem_work_dir = song_work / stem_folder_name
+    
     if song_work.exists():
         shutil.rmtree(song_work)
-    song_work.mkdir(parents=True, exist_ok=True)
+    stem_work_dir.mkdir(parents=True, exist_ok=True)
     
     extract_dir = song_work / "extracted"
-    extract_dir.mkdir(exist_ok=True)
+    extract_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Extract Stemdeck archive
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(extract_dir)
+    # Handle PDF chart import with try/except error handling
+    has_pdf = False
+    pdf_dest_filename = f"{song_stem}.pdf"
+    pdf_dest_path = stem_work_dir / pdf_dest_filename
+    pdf_source_path = PDF_DIR / f"{song_stem}.pdf"
+    
+    try:
+        if pdf_source_path.exists():
+            shutil.copy(pdf_source_path, pdf_dest_path)
+            has_pdf = True
+    except Exception as e:
+        print(f"[!] Warning: Error copying PDF file for {song_stem}: {e}")
 
-    # Parse Artist and Title assuming 'Artist - Title' or 'Artist-Title'
-    parts = song_stem.split("-", 1)
+    # Extract Stemdeck archive (flat extraction)
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for member in zf.namelist():
+                filename = os.path.basename(member)
+                if filename:
+                    source = zf.open(member)
+                    target_path = extract_dir / filename
+                    with open(target_path, "wb") as target:
+                        shutil.copyfileobj(source, target)
+                    source.close()
+    except Exception as e:
+        print(f"[!] Error extracting zip for {song_stem}: {e}")
+        return
+
+    # Parse Artist and Title, replacing underscores with spaces for visual consistency
+    formatted_stem = song_stem.replace('_', ' ')
+    parts = formatted_stem.split("-", 1)
     artist = parts[0].strip() if len(parts) > 1 else "Unknown Artist"
-    title = parts[1].strip() if len(parts) > 1 else song_stem
+    title = parts[1].strip() if len(parts) > 1 else formatted_stem
 
-    song_uuid = get_url_uuid(song_stem)
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    # 3. Process and normalize individual stems
+    # Process, rename, and move individual stems into the UUID-suffixed subfolder
     extracted_audio = list(extract_dir.glob("*.*"))
     track_entries = []
     duration = 0.0
-
-    # First pass: move and rename audio files into final naming convention
     processed_stems = []
+
     for file in extracted_audio:
         if file.suffix.lower() in ['.mp3', '.wav', '.m4a']:
             stem_type = classify_stem_type(file.name)
             dest_filename = f"{song_stem}_{stem_type}.mp3"
-            dest_path = song_work / dest_filename
+            dest_path = stem_work_dir / dest_filename
             
-            # Convert/Copy file to staging
             shutil.move(file, dest_path)
             processed_stems.append((stem_type, dest_path))
 
-            # Grab duration from lead vocals (or fallback to first valid track)
             if stem_type == 'lead-vocals' or duration == 0.0:
                 duration = get_song_len(dest_path)
 
-    # Fallback duration if ffprobe fails or audio is short
     if duration == 0.0:
         duration = get_song_len(mp3_path)
 
-    # 4. Build Track metadata entries matching your JSON schema
-    for idx, (stem_type, dest_path) in enumerate(processed_stems, start=1):
+    # Build Track metadata entries
+    for stem_type, dest_path in processed_stems:
         track_id = get_url_uuid(dest_path.name)
         bus_num = TRACK2BUS.get(stem_type, 7)
         short_name = STEM_NAMES.get(stem_type, "others")
-        color_val = TRACK_COLORS[(idx - 1) % len(TRACK_COLORS)]
-
+        
         track_entry = {
             "id": track_id,
             "songID": song_uuid,
             "name": short_name,
-            "number": idx,
-            "filePath": dest_path.name,
             "bus": bus_num,
+            "filePath": f"{stem_folder_name}/{dest_path.name}",
             "volume": 0.0,
             "mute": False,
             "pan": 0.0,
@@ -177,7 +203,6 @@ def process_song(mp3_path: Path):
                 ]
             },
             "duration": duration,
-            "color": color_val,
             "hasMarkers": False,
             "lastModified": timestamp,
             "muteGroupMask": 0,
@@ -185,7 +210,13 @@ def process_song(mp3_path: Path):
         }
         track_entries.append(track_entry)
 
-    # 5. Build master Stage Traxx 4 JSON payload (`share_data.json`)
+    # Sort tracks by bus order (1 to 7) and assign sequential track numbers
+    track_entries.sort(key=lambda x: x["bus"])
+    for idx, track in enumerate(track_entries, start=1):
+        track["number"] = idx
+        track["color"] = TRACK_COLORS[(idx - 1) % len(TRACK_COLORS)]
+
+    # Build master Stage Traxx 4 JSON payload (`share_data.json`)
     share_data = {
         "metadata": {
             "created": timestamp,
@@ -228,7 +259,8 @@ def process_song(mp3_path: Path):
                 "startTime": 0.0,
                 "timecodeOffset": 0.0,
                 "tune": 0,
-                "lyrics": ""
+                "lyrics": "",
+                "pdfPath": f"{stem_folder_name}/{pdf_dest_filename}" if has_pdf else ""
             }
         ],
         "tracks": track_entries
@@ -237,34 +269,33 @@ def process_song(mp3_path: Path):
     with open(song_work / "share_data.json", "w") as f:
         json.dump(share_data, f, indent=2)
 
-    # Copy PDF chart if available
-    if pdf_path:
-        shutil.copy(pdf_path, song_work / "chart.pdf")
-
-    # Cleanup intermediate extraction folder
+    # Cleanup extraction folder
     if extract_dir.exists():
         shutil.rmtree(extract_dir)
 
-    # 6. Compress staging folder into .zip and rename extension to .st4s
+    # Compress workspace directory structure into final .st4s package
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     st4s_path = OUTPUT_DIR / f"{song_stem}.st4s"
     
     with zipfile.ZipFile(st4s_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file_path in song_work.iterdir():
+        for file_path in song_work.rglob("*"):
             if file_path.is_file():
-                zf.write(file_path, file_path.name)
+                arcname = file_path.relative_to(song_work)
+                zf.write(file_path, arcname)
 
-    # Cleanup song workspace
     shutil.rmtree(song_work)
-    print(f"[+] Successfully built Stage Traxx package: {st4s_path.name}")
+    print(f"[+] Successfully built: {st4s_path.name}")
 
 def main():
     WORK_DIR.mkdir(exist_ok=True)
-    mp3_files = list(MP3_DIR.glob("*.mp3"))
-    print(f"Found {len(mp3_files)} tracks to process.")
+
+    VALID_EXTENSIONS = {'.mp3', '.flac', '.mp4'}
+    audio_files = [p for p in MP3_DIR.iterdir() if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS]
+
+    print(f"Found {len(audio_files)} tracks to process.")
     
-    for mp3 in mp3_files:
-        process_song(mp3)
+    for afile in audio_files:
+        process_song(afile)
         
     if WORK_DIR.exists():
         shutil.rmtree(WORK_DIR)
