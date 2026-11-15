@@ -12,5 +12,7 @@ stem2st4s
 * * edit it to your heart's content
 
 Neither of these try to get all the information that can be used by Stage Traxx, so things like 
-lyric timing (from PDFs) or tempos aren't even bothered with.  Tempo defaults to 120bpm, but you can fix that in edit mode.
+lyric timing (from PDFs) or tempos aren't even bothered with.  
+
+Tempo defaults to 120bpm, but you can fix that in edit mode.
 I don't use the tempos at all because I don't  have any triggers or midi to deal with.
