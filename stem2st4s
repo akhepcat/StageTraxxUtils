@@ -10,11 +10,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # --- Configuration Directories ---
-MP3_DIR = Path("./mp3s")
-ZIP_DIR = Path("./zips")
-PDF_DIR = Path("./PDFs")
-OUTPUT_DIR = Path("./Exports")
-WORK_DIR = Path("./work_temp")
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = SCRIPT_DIR / Path("config.json")
+DEFAULT_CONFIG = {
+    "mp3_dir": "~/mp3s",
+    "zip_dir": "~/stemdeck",
+    "pdf_dir": "~/pdfs",
+    "output_dir": "~/stagetraxx",
+    "work_dir": "~/temp"
+}
+if CONFIG_FILE.exists():
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            user_config = json.load(f)
+            # Merge with defaults in case keys are missing
+            config = {**DEFAULT_CONFIG, **user_config}
+    except Exception as e:
+        print(f"[!] Error reading config.json: {e}. Using defaults.")
+        config = DEFAULT_CONFIG
+else:
+    print("[!] config.json not found. Using default paths.")
+    config = DEFAULT_CONFIG
+
+# --- Configuration Directories ---
+MP3_DIR = Path(config["mp3_dir"])
+ZIP_DIR = Path(config["zip_dir"])
+PDF_DIR = Path(config["pdf_dir"])
+OUTPUT_DIR = Path(config["output_dir"])
+WORK_DIR = Path(config["work_dir"])
 
 
 # --- Stage Traxx 4 Mappings ---
@@ -78,27 +101,34 @@ def get_song_len(file_path: Path) -> float:
         return 0.0
 
 def classify_stem_type(filename: str) -> str:
-    """Map extracted stem filename keywords to standard bus categories."""
-    lower = filename.lower()
-    if ('lead' in lower or 'vocal' in lower) and 'back' not in lower and 'bg' not in lower:
+    """Classify based strictly on the exact trailing suffix of the filename."""
+    stem_lower = Path(filename).stem.lower()
+    
+    if stem_lower.endswith(('_lead_vocals', 'leadvocals', '_lead_vocal', 'lead_vocals')):
         return 'lead-vocals'
-    elif 'back' in lower or 'bg' in lower or 'harmony' in lower:
+    elif stem_lower.endswith(('_backing_vocals', 'backingvocals', '_backing_vocal', '_bg_vocals', 'bg_vocals', 'backing_vocals')):
         return 'backing-vocals'
-    elif 'guitar' in lower or 'guit' in lower:
-        return 'guitar'
-    elif 'bass' in lower:
-        return 'bass'
-    elif 'drum' in lower or 'perc' in lower:
+    elif stem_lower.endswith(('_drum', '_drums', 'drums', 'drum')):
         return 'drums'
-    elif 'piano' in lower or 'keys' in lower or 'synth' in lower:
+    elif stem_lower.endswith(('_bass', 'bass')):
+        return 'bass'
+    elif stem_lower.endswith(('_guitar', 'guitar', '_guit', 'guit')):
+        return 'guitar'
+    elif stem_lower.endswith(('_piano', 'piano', '_keys', 'keys', 'synth')):
         return 'piano'
     else:
         return 'other'
 
 def process_song(mp3_path: Path):
     song_stem = mp3_path.stem
-    print(f"[-] Processing: {song_stem}")
     
+    st4s_path = OUTPUT_DIR / f"{song_stem}.st4s"
+    if st4s_path.exists():
+        # print(f"[i] Skipping existing: {song_stem}")
+        return
+
+    print(f"[-] Processing: {song_stem}")
+
     # Match Stemdeck zip using fuzzy lookup
     zip_path = find_matching_zip(song_stem, ZIP_DIR)
     if not zip_path:
@@ -126,13 +156,13 @@ def process_song(mp3_path: Path):
     pdf_dest_filename = f"{song_stem}.pdf"
     pdf_dest_path = stem_work_dir / pdf_dest_filename
     pdf_source_path = PDF_DIR / f"{song_stem}.pdf"
-    
+  
     try:
         if pdf_source_path.exists():
             shutil.copy(pdf_source_path, pdf_dest_path)
             has_pdf = True
     except Exception as e:
-        print(f"[!] Warning: Error copying PDF file for {song_stem}: {e}")
+        print(f"[!] Warning: Missing PDF file for {song_stem}: {e}")
 
     # Extract Stemdeck archive (flat extraction)
     try:
@@ -141,6 +171,7 @@ def process_song(mp3_path: Path):
                 filename = os.path.basename(member)
                 if filename:
                     source = zf.open(member)
+                    # print(f"[D] extracting {filename} for {song_stem}")
                     target_path = extract_dir / filename
                     with open(target_path, "wb") as target:
                         shutil.copyfileobj(source, target)
@@ -154,6 +185,7 @@ def process_song(mp3_path: Path):
     parts = formatted_stem.split("-", 1)
     artist = parts[0].strip() if len(parts) > 1 else "Unknown Artist"
     title = parts[1].strip() if len(parts) > 1 else formatted_stem
+    #print(f"[D] artist is: {artist} --And title is: {title}")
 
     timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -164,10 +196,16 @@ def process_song(mp3_path: Path):
     processed_stems = []
 
     for file in extracted_audio:
+        #print(f"[D] found {file} for processing")
+
         if file.suffix.lower() in ['.mp3', '.wav', '.m4a']:
             stem_type = classify_stem_type(file.name)
+
+            # FIX: Use stem_type dynamically so each file gets its own unique name
             dest_filename = f"{song_stem}_{stem_type}.mp3"
             dest_path = stem_work_dir / dest_filename
+            
+            #print(f"[D] moving {file} to {dest_path}")
             
             shutil.move(file, dest_path)
             processed_stems.append((stem_type, dest_path))
@@ -183,12 +221,14 @@ def process_song(mp3_path: Path):
         track_id = get_url_uuid(dest_path.name)
         bus_num = TRACK2BUS.get(stem_type, 7)
         short_name = STEM_NAMES.get(stem_type, "others")
+
+        #print(f"[D] adding track {track_id} for {dest_path.name}")
         
         track_entry = {
             "id": track_id,
             "songID": song_uuid,
             "name": short_name,
-            "bus": bus_num,
+            "bus": bus_num - 1,
             "filePath": f"{stem_folder_name}/{dest_path.name}",
             "volume": 0.0,
             "mute": False,
@@ -275,7 +315,6 @@ def process_song(mp3_path: Path):
 
     # Compress workspace directory structure into final .st4s package
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    st4s_path = OUTPUT_DIR / f"{song_stem}.st4s"
     
     with zipfile.ZipFile(st4s_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for file_path in song_work.rglob("*"):
@@ -293,7 +332,7 @@ def main():
     audio_files = [p for p in MP3_DIR.iterdir() if p.is_file() and p.suffix.lower() in VALID_EXTENSIONS]
 
     print(f"Found {len(audio_files)} tracks to process.")
-    
+
     for afile in audio_files:
         process_song(afile)
         

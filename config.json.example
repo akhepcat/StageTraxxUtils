@@ -1,0 +1,7 @@
+{
+  "mp3_dir": "./original_mp3s",
+  "zip_dir": "./stemdeck_zips",
+  "pdf_dir": "./pdf_charts",
+  "output_dir": "./st4s_output",
+  "work_dir": "./work_temp"
+}
